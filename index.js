@@ -69,12 +69,13 @@ function similarity(a = "", b = "") {
 }
 
 // -------------------------------
-// HELPER: Generate acronym
+// -------------------------------
+// HELPER: Generate acronym (keep all words)
 // -------------------------------
 function generateAcronym(name = "") {
     return name
         .split(/\s+/)
-        .filter(word => word && !["a","the","of","no","on","in"].includes(word.toLowerCase()))
+        .filter(word => word)        // only remove empty strings
         .map(word => word[0].toUpperCase())
         .join('');
 }
@@ -216,3 +217,4 @@ client.on("messageCreate", async (msg) => {
 // Start bot
 // -------------------------------
 client.login(TOKEN);
+
