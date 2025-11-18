@@ -167,9 +167,11 @@ client.on('interactionCreate', async interaction => {
     const query = interaction.options.getString('mode');
 
     try {
-        const response = await axios.get(API_URL);
-        const levels = response.data;
-        if (!Array.isArray(levels)) throw new Error('Invalid API response');
+    await interaction.deferReply({ ephemeral: true });
+
+    const response = await axios.get(API_URL);  // ← MUST be here, after defer
+    const levels = response.data;
+    if (!Array.isArray(levels)) throw new Error('Invalid API response');
 
         let bestMatch = findBestMatch(levels, query);
 
@@ -212,3 +214,4 @@ client.on('interactionCreate', async interaction => {
 // START BOT
 // -------------------------------
 client.login(TOKEN);
+
