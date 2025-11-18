@@ -25,25 +25,23 @@ const client = new Client({
 
 // -------------------------------
 // HELPER: Normalize string
-// Lowercase, remove punctuation except dots (for version numbers)
 // -------------------------------
-function normalize(str) {
+function normalize(str = "") {
     return str.toLowerCase().replace(/[^a-z0-9\.]+/g, " ").trim();
 }
 
 // -------------------------------
-// HELPER: Extract version number (like v1.2, v1.2.0.5 → 1.2)
+// HELPER: Extract version number
 // -------------------------------
-function extractVersion(str) {
+function extractVersion(str = "") {
     const match = str.match(/v?(\d+(\.\d+)*)/i);
     return match ? match[1] : null;
 }
 
 // -------------------------------
-// HELPER: Levenshtein similarity (0 to 1)
-// Only used as last resort
+// HELPER: Levenshtein similarity
 // -------------------------------
-function similarity(a, b) {
+function similarity(a = "", b = "") {
     a = a.toLowerCase();
     b = b.toLowerCase();
 
@@ -52,10 +50,7 @@ function similarity(a, b) {
     if (lenA === 0 && lenB === 0) return 1;
     if (lenA === 0 || lenB === 0) return 0;
 
-    const dp = Array.from({ length: lenA + 1 }, () =>
-        new Array(lenB + 1).fill(0)
-    );
-
+    const dp = Array.from({ length: lenA + 1 }, () => new Array(lenB + 1).fill(0));
     for (let i = 0; i <= lenA; i++) dp[i][0] = i;
     for (let j = 0; j <= lenB; j++) dp[0][j] = j;
 
@@ -70,14 +65,13 @@ function similarity(a, b) {
         }
     }
 
-    const distance = dp[lenA][lenB];
-    return 1 - distance / Math.max(lenA, lenB);
+    return 1 - dp[lenA][lenB] / Math.max(lenA, lenB);
 }
 
 // -------------------------------
-// HELPER: Generate acronym from mode name
+// HELPER: Generate acronym
 // -------------------------------
-function generateAcronym(name) {
+function generateAcronym(name = "") {
     return name
         .split(/\s+/)
         .filter(word => !["a","the","of","no","on","in"].includes(word.toLowerCase()))
@@ -99,7 +93,7 @@ function findBestMatch(levels, query) {
         return exact;
     }
 
-    // 2) Acronym match (auto-generated)
+    // 2) Acronym match
     const acronymMap = {};
     levels.forEach(level => {
         if (!level.name) return;
@@ -115,8 +109,7 @@ function findBestMatch(levels, query) {
             level.exactMatch = true;
             return level;
         } else {
-            // ambiguous acronym → return null to ask user
-            return null;
+            return null; // ambiguous acronym
         }
     }
 
@@ -131,7 +124,6 @@ function findBestMatch(levels, query) {
         multiWordMatches[0].exactMatch = false;
         return multiWordMatches[0];
     } else if (multiWordMatches.length > 1) {
-        // try narrowing by version if provided
         const inputVersion = extractVersion(q);
         if (inputVersion) {
             const versionMatch = multiWordMatches.find(level => {
@@ -143,11 +135,10 @@ function findBestMatch(levels, query) {
                 return versionMatch;
             }
         }
-        // still multiple matches → return null to trigger collision message
-        return null;
+        return null; // multiple matches, ask user
     }
 
-    // 4) Fuzzy match (last resort)
+    // 4) Fuzzy match
     let bestScore = 0;
     let bestMatch = null;
     for (const level of levels) {
@@ -190,7 +181,7 @@ client.on("messageCreate", async (msg) => {
         let bestMatch = findBestMatch(levels, query);
 
         if (!bestMatch) {
-            // check for multi-word collision to provide friendly message
+            // check multi-word collision
             const qWords = normalize(query).split(" ");
             const multiWordMatches = levels.filter(level => {
                 if (!level.name) return false;
@@ -210,14 +201,9 @@ client.on("messageCreate", async (msg) => {
         }
 
         if (bestMatch.exactMatch) {
-            return msg.reply(
-                `**${bestMatch.name}** is ranked **#${bestMatch.top}** on the list.`
-            );
+            return msg.reply(`**${bestMatch.name}** is ranked **#${bestMatch.top}** on the list.`);
         } else {
-            return msg.reply(
-                `I assumed you meant: **${bestMatch.name}**\n` +
-                `It is ranked **#${bestMatch.top}** on the list.`
-            );
+            return msg.reply(`I assumed you meant: **${bestMatch.name}**\nIt is ranked **#${bestMatch.top}** on the list.`);
         }
 
     } catch (error) {
