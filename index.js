@@ -171,16 +171,21 @@ client.on('interactionCreate', async interaction => {
 
     const query = interaction.options.getString('mode');
 
+    // ALWAYS defer first — BEFORE any async/await that may throw
     try {
-        // 🔥 Fix for 10062 — acknowledge instantly
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: 64 }); // EPHEMERAL
+    } catch (err) {
+        console.error('Defer failed:', err);
+        return;
+    }
 
+    try {
         // Fetch API
         const response = await axios.get(API_URL);
         const levels = response.data;
         if (!Array.isArray(levels)) throw new Error('Invalid API response');
 
-        // Process match
+        // Match
         let bestMatch = findBestMatch(levels, query);
 
         if (!bestMatch) {
@@ -210,8 +215,14 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply(reply);
 
     } catch (err) {
-        console.error(err);
-        return interaction.editReply('There was an error while contacting the API.');
+        console.error('Handler error:', err);
+
+        // SAFEST way: check whether we can edit reply
+        if (interaction.deferred || interaction.replied) {
+            return interaction.editReply('There was an error while contacting the API.');
+        } else {
+            return interaction.reply({ content: 'Unexpected error occurred.', flags: 64 });
+        }
     }
 });
 
@@ -219,3 +230,4 @@ client.on('interactionCreate', async interaction => {
 // Start bot
 // -------------------------------
 client.login(TOKEN);
+
