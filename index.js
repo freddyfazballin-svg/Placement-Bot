@@ -68,87 +68,81 @@ function similarity(a = "", b = "") {
 }
 
 // -------------------------------
-// HELPER: Generate acronym (keep meaningful words like "No")
+// HELPER: Generate full acronym (keep all words)
 // -------------------------------
 function generateAcronym(name = "") {
     return name
         .split(/\s+/)
-        .filter(word => word) // keep all meaningful words
+        .filter(word => word) // keep all words
         .map(word => word[0].toUpperCase())
         .join('');
 }
 
 // -------------------------------
-// HELPER: Find best match (supports mixed queries)
+// HELPER: Check if acronym matches query letters in order
+// -------------------------------
+function matchesAcronymQuery(acronym, query) {
+    let i = 0;
+    const q = query.toUpperCase();
+    for (const char of acronym) {
+        if (char === q[i]) i++;
+        if (i === q.length) return true;
+    }
+    return false;
+}
+
+// -------------------------------
+// HELPER: Find best match
 // -------------------------------
 function findBestMatch(levels, query) {
     const q = normalize(query);
     const qWords = q.split(" ").filter(Boolean);
-    const upperQuery = query.replace(/\s+/g, '').toUpperCase();
+    const queryNoSpaces = query.replace(/\s+/g, '').toUpperCase();
 
-    // Build acronym map
-    const acronymMap = {};
-    levels.forEach(level => {
-        if (!level.name) return;
-        const acr = generateAcronym(level.name);
-        if (!acronymMap[acr]) acronymMap[acr] = [];
-        acronymMap[acr].push(level);
-    });
-
-    // 1) Exact name match
+    // 1) Exact match
     const exact = levels.find(level => level.name && normalize(level.name) === q);
     if (exact) { exact.exactMatch = true; return exact; }
 
-    // 2) Full acronym match
-    if (acronymMap[upperQuery]) {
-        if (acronymMap[upperQuery].length === 1) {
-            const level = acronymMap[upperQuery][0];
-            level.exactMatch = true;
-            return level;
-        } else {
-            return null; // ambiguous acronym
-        }
+    // 2) Acronym partial match
+    const acronymMatches = levels.filter(level => {
+        if (!level.name) return false;
+        const acr = generateAcronym(level.name);
+        return matchesAcronymQuery(acr, queryNoSpaces);
+    });
+    if (acronymMatches.length === 1) {
+        acronymMatches[0].exactMatch = true;
+        return acronymMatches[0];
+    } else if (acronymMatches.length > 1) {
+        return null; // multiple acronym matches
     }
 
-    // 3) Mixed query: match parts + acronyms
+    // 3) Mixed query match (words + acronyms)
     const mixedMatches = levels.filter(level => {
         if (!level.name) return false;
         const levelWords = normalize(level.name).split(" ").filter(Boolean);
         const levelAcr = generateAcronym(level.name);
 
-        // All words in query must be either in levelWords or match part of acronym
         return qWords.every(word => {
             if (word.length > 1 && word === word.toUpperCase()) {
-                // treat as acronym letters
-                return word.split('').every(letter => levelAcr.includes(letter));
+                // treat as acronym fragment
+                return matchesAcronymQuery(levelAcr, word);
             } else {
                 return levelWords.includes(word);
             }
         });
     });
 
-    if (mixedMatches.length === 1) {
-        mixedMatches[0].exactMatch = false;
-        return mixedMatches[0];
-    } else if (mixedMatches.length > 1) {
-        return null; // multiple matches
-    }
+    if (mixedMatches.length === 1) { mixedMatches[0].exactMatch = false; return mixedMatches[0]; }
+    if (mixedMatches.length > 1) return null;
 
-    // 4) Substring/fuzzy fallback
+    // 4) Fuzzy match fallback
     let bestMatch = null, bestScore = 0;
-    levels.forEach(level => {
-        if (!level.name) return;
+    for (const level of levels) {
+        if (!level.name) continue;
         const score = similarity(q, normalize(level.name));
-        if (score > bestScore) {
-            bestScore = score;
-            bestMatch = level;
-        }
-    });
-
-    if (bestMatch && bestScore >= 0.7) {
-        bestMatch.exactMatch = false;
-        return bestMatch;
+        if (score > bestScore) { bestScore = score; bestMatch = level; }
     }
+    if (bestScore >= 0.7) { bestMatch.exactMatch = false; return bestMatch; }
 
     return null;
 }
@@ -161,7 +155,6 @@ client.on("messageCreate", async msg => {
     const content = msg.content.trim();
 
     if (!content.toLowerCase().startsWith("!rank")) return;
-
     const args = content.slice("!rank".length).trim();
 
     // Handle "!rank <number>" for multi-match selection
@@ -177,7 +170,6 @@ client.on("messageCreate", async msg => {
         }
     }
 
-    // Otherwise normal !rank query
     const query = args;
     if (!query) return msg.reply("Tell me a mode name. Example: `!rank Hopeless Pursuit`");
 
@@ -193,19 +185,18 @@ client.on("messageCreate", async msg => {
         const bestMatch = findBestMatch(levels, query);
 
         if (!bestMatch) {
-            // Multi-word collision
-            const qWords = normalize(query).split(" ").filter(Boolean);
-            const multiMatches = levels.filter(level => {
+            // Multi-match collision fallback
+            const multiWordMatches = levels.filter(level => {
                 if (!level.name) return false;
                 const levelWords = normalize(level.name).split(" ").filter(Boolean);
                 return qWords.every(word => levelWords.includes(word));
             });
 
-            if (multiMatches.length > 1) {
-                lastMultiMatch[msg.author.id] = multiMatches;
+            if (multiWordMatches.length > 1) {
+                lastMultiMatch[msg.author.id] = multiWordMatches;
                 return msg.reply(
                     `Multiple modes match your query:\n` +
-                    multiMatches.map((l,i)=>`${i+1}. ${l.name}`).join("\n") +
+                    multiWordMatches.map((l,i)=>`${i+1}. ${l.name}`).join("\n") +
                     `\nType !rank <number> to select the correct mode.`
                 );
             }
