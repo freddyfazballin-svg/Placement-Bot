@@ -169,59 +169,40 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     if (interaction.commandName !== 'rank') return;
 
-    const query = interaction.options.getString('mode');
-
-    // ALWAYS defer first — BEFORE any async/await that may throw
+    // 🔥 MUST be first, no async or function calls before
     try {
-        await interaction.deferReply({ flags: 64 }); // EPHEMERAL
+        await interaction.deferReply({ flags: 64 });
     } catch (err) {
-        console.error('Defer failed:', err);
+        console.error("Failed to defer:", err);
         return;
     }
 
     try {
-        // Fetch API
-        const response = await axios.get(API_URL);
+        // Add a timeout so axios doesn't hang for 5s+
+        const response = await axios.get(API_URL, { timeout: 2000 });
         const levels = response.data;
-        if (!Array.isArray(levels)) throw new Error('Invalid API response');
 
-        // Match
-        let bestMatch = findBestMatch(levels, query);
+        if (!Array.isArray(levels))
+            throw new Error('Invalid API response');
+
+        const bestMatch = findBestMatch(levels, interaction.options.getString('mode'));
 
         if (!bestMatch) {
-            const qWords = normalize(query).split(" ");
-            const multiWordMatches = levels.filter(l => {
-                if (!l.name) return false;
-                const words = normalize(l.name).split(" ");
-                return qWords.every(w => words.includes(w));
-            });
-
-            if (multiWordMatches.length > 1) {
-                lastMultiMatch[interaction.user.id] = multiWordMatches;
-                return interaction.editReply(
-                    `Multiple modes match your query:\n` +
-                    multiWordMatches.map((l,i) => `${i+1}. ${l.name}`).join('\n') +
-                    `\nType the number with /select <number>`
-                );
-            }
-
-            return interaction.editReply(`I couldn't find anything close to **${query}**.`);
+            return interaction.editReply("No results.");
         }
 
-        const reply = bestMatch.exactMatch
-            ? `**${bestMatch.name}** is ranked **#${bestMatch.top}**.`
-            : `I assumed you meant: **${bestMatch.name}**\nIt is ranked **#${bestMatch.top}**.`;
-
-        return interaction.editReply(reply);
+        return interaction.editReply(
+            `**${bestMatch.name}** is ranked **#${bestMatch.top}**.`
+        );
 
     } catch (err) {
-        console.error('Handler error:', err);
+        console.error("Handler error:", err);
 
-        // SAFEST way: check whether we can edit reply
+        // Ensure safe fallback
         if (interaction.deferred || interaction.replied) {
-            return interaction.editReply('There was an error while contacting the API.');
+            return interaction.editReply("API timeout or error.");
         } else {
-            return interaction.reply({ content: 'Unexpected error occurred.', flags: 64 });
+            return interaction.reply({ content: "Could not reply.", flags: 64 });
         }
     }
 });
@@ -230,4 +211,5 @@ client.on('interactionCreate', async interaction => {
 // Start bot
 // -------------------------------
 client.login(TOKEN);
+
 
