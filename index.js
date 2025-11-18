@@ -13,8 +13,9 @@ const client = new Client({
   ]
 });
 
-// in-memory per-user storage for multi-match lists
-const lastMultiMatch = {}; // { userId: { timestamp, matches } }
+// per-user short-lived store for multi-match lists
+const lastMultiMatch = {}; // { userId: { timestamp, matches: [ { name, top, id? } ] } }
+const MULTI_MATCH_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 // ---------- helpers ----------
 function normalize(str = "") {
@@ -32,7 +33,6 @@ function similarity(a = "", b = "") {
   const lenA = a.length, lenB = b.length;
   if (!lenA && !lenB) return 1;
   if (!lenA || !lenB) return 0;
-
   const dp = Array.from({ length: lenA + 1 }, () => new Array(lenB + 1).fill(0));
   for (let i = 0; i <= lenA; i++) dp[i][0] = i;
   for (let j = 0; j <= lenB; j++) dp[0][j] = j;
@@ -45,6 +45,7 @@ function similarity(a = "", b = "") {
   return 1 - dp[lenA][lenB] / Math.max(lenA, lenB);
 }
 
+// create acronym by taking first letter of every word (keep 'no')
 function generateAcronym(name = "") {
   return String(name)
     .split(/\s+/)
@@ -53,7 +54,7 @@ function generateAcronym(name = "") {
     .join('');
 }
 
-// returns true if every character of query (already uppercased) appears in order in acronym
+// returns true if every character of "query" appears in order inside "acronym"
 function matchesAcronymQuery(acronym = "", query = "") {
   if (!query) return false;
   acronym = String(acronym).toUpperCase();
@@ -66,14 +67,14 @@ function matchesAcronymQuery(acronym = "", query = "") {
   return false;
 }
 
-// Precompute useful fields for each level object (skip entries without name)
+// convert raw API list into enriched items that are cheap to check repeatedly
 function enrichLevels(rawLevels) {
   return rawLevels
-    .filter(l => l && l.name)
+    .filter(l => l && l.name) // skip malformed entries
     .map(l => {
       const normalizedName = normalize(l.name);
       const normalizedWords = normalizedName.split(" ").filter(Boolean);
-      const acronym = generateAcronym(l.name); // full acronym, keep all words
+      const acronym = generateAcronym(l.name); // full acronym
       const version = extractVersion(l.name) || null;
       return {
         original: l,
@@ -88,7 +89,7 @@ function enrichLevels(rawLevels) {
 }
 
 // ---------- matching engine ----------
-function findBestMatch(enrichedLevels, rawQuery) {
+function findBestMatch(enriched, rawQuery) {
   const query = String(rawQuery || "");
   const qNormalized = normalize(query);
   const qWords = qNormalized.split(" ").filter(Boolean);
@@ -96,52 +97,53 @@ function findBestMatch(enrichedLevels, rawQuery) {
   const inputVersion = extractVersion(query);
 
   // 1) exact normalized name
-  const exact = enrichedLevels.find(l => l.normalizedName === qNormalized);
+  const exact = enriched.find(l => l.normalizedName === qNormalized);
   if (exact) { exact.exactMatch = true; return exact; }
 
-  // 2) full-acronym / partial-acronym match (query as continuous letters)
-  if (queryNoSpacesUpper && /^[A-Z]+$/.test(queryNoSpacesUpper)) {
-    // treat as acronym letters; allow matching by "letters in order" across acronym
-    const acrMatches = enrichedLevels.filter(l => matchesAcronymQuery(l.acronym, queryNoSpacesUpper));
+  // 2) If the user typed only letters (no spaces) treat as acronym-ish query
+  if (/^[A-Z]+$/i.test(queryNoSpacesUpper)) {
+    const acrMatches = enriched.filter(l => matchesAcronymQuery(l.acronym, queryNoSpacesUpper));
     if (acrMatches.length === 1) { acrMatches[0].exactMatch = true; return acrMatches[0]; }
     if (acrMatches.length > 1) return null; // ambiguous acronym
   }
 
-  // 3) Mixed query support: tokens may be words or small acronym fragments (e.g., "hp", "rv")
-  // We interpret a token as acronym-like if it's only letters and length >= 2
-  const mixedMatches = enrichedLevels.filter(level => {
-    // all tokens must match either a word in normalizedWords OR be an acronym fragment present in acronym
+  // 3) Mixed token matching - tokens can be words, versions, or small acronyms
+  const mixedMatches = enriched.filter(level => {
     return qWords.every(token => {
       if (!token) return true;
-      // if token looks like a version (has digits or dots), match version separately
+      // version-like token?
       if (/^\d+(\.\d+)*$/.test(token) || /^v?\d+(\.\d+)*$/i.test(token)) {
         const tver = extractVersion(token);
         return tver && level.version && level.version.startsWith(tver);
       }
-      // acronym-like token: only letters, length >=2
+      // acronym-like token: letters only and length >= 2 (e.g., hp, rv, hprvnpg)
       if (/^[a-zA-Z]{2,}$/.test(token)) {
-        // match as acronym fragment (letters in order)
+        // accept if token appears as letters-in-order in the level acronym OR token is a normal word in the name
         return matchesAcronymQuery(level.acronym, token.toUpperCase()) || level.normalizedWords.includes(token);
       }
-      // fallback: normal word match against normalizedWords
+      // fallback: plain word match
       return level.normalizedWords.includes(token);
     });
   });
 
   if (mixedMatches.length === 1) { mixedMatches[0].exactMatch = false; return mixedMatches[0]; }
   if (mixedMatches.length > 1) {
-    // if version provided, try prefer one that matches version
+    // try to disambiguate by version if present
     if (inputVersion) {
       const vm = mixedMatches.find(l => l.version && l.version.startsWith(inputVersion));
       if (vm) { vm.exactMatch = false; return vm; }
     }
-    return null; // ambiguous
+    return null;
   }
 
-  // 4) Strict multi-word match: every query word must appear in the level name words (useful for "generator v1.6.5")
+  // 4) Strict multi-word match (every query word must be present, useful for "generator v1.6.5")
   if (qWords.length > 0) {
-    const strictMatches = enrichedLevels.filter(level =>
-      qWords.every(w => level.normalizedWords.includes(w) || (extractVersion(w) && level.version && level.version.startsWith(extractVersion(w))))
+    const strictMatches = enriched.filter(level =>
+      qWords.every(w => {
+        const ver = extractVersion(w);
+        if (ver) return level.version && level.version.startsWith(ver);
+        return level.normalizedWords.includes(w);
+      })
     );
     if (strictMatches.length === 1) { strictMatches[0].exactMatch = false; return strictMatches[0]; }
     if (strictMatches.length > 1) {
@@ -155,7 +157,7 @@ function findBestMatch(enrichedLevels, rawQuery) {
 
   // 5) Fuzzy fallback (last resort)
   let best = null, bestScore = 0;
-  for (const level of enrichedLevels) {
+  for (const level of enriched) {
     const score = similarity(qNormalized, level.normalizedName);
     if (score > bestScore) { bestScore = score; best = level; }
   }
@@ -172,14 +174,15 @@ client.on("messageCreate", async msg => {
     if (!raw.toLowerCase().startsWith("!rank")) return;
 
     const args = raw.slice("!rank".length).trim();
-    // handle number selection: must be pure integer (no text) and user must have stored multi-match
+
+    // 1) If args is a plain integer and user has a stored multi-match -> select it
     if (/^\d+$/.test(args) && lastMultiMatch[msg.author.id]) {
       const idx = parseInt(args, 10);
       const stored = lastMultiMatch[msg.author.id];
-      // optional expiry: 5 minutes (300000 ms)
-      if (Date.now() - stored.timestamp > 300000) {
+      // expiry
+      if (Date.now() - stored.timestamp > MULTI_MATCH_TTL_MS) {
         delete lastMultiMatch[msg.author.id];
-        return msg.reply("Your previous selection expired. Please run `!rank` again.");
+        return msg.reply("Your previous selection expired — please run `!rank` again.");
       }
       if (idx < 1 || idx > stored.matches.length) {
         return msg.reply(`Invalid selection. Choose a number between 1 and ${stored.matches.length}.`);
@@ -189,10 +192,11 @@ client.on("messageCreate", async msg => {
       return msg.reply(`You selected: **${chosen.name}** — ranked **#${chosen.top}**`);
     }
 
+    // normal query
     const query = args;
     if (!query) return msg.reply("Tell me a mode name. Example: `!rank Hopeless Pursuit`");
 
-    // fetch levels and enrich
+    // fetch and enrich
     const response = await axios.get(API_URL);
     const rawLevels = response.data;
     if (!Array.isArray(rawLevels)) {
@@ -201,17 +205,21 @@ client.on("messageCreate", async msg => {
     }
     const enriched = enrichLevels(rawLevels);
 
-    // find best match
+    // match
     const match = findBestMatch(enriched, query);
 
     if (!match) {
-      // attempt to find strict multi-word collisions to show to user
+      // find strict collisions to show list
       const qWords = normalize(query).split(" ").filter(Boolean);
       const collisions = enriched.filter(level =>
-        qWords.every(w => level.normalizedWords.includes(w) || (extractVersion(w) && level.version && level.version.startsWith(extractVersion(w))))
+        qWords.every(w => {
+          const ver = extractVersion(w);
+          if (ver) return level.version && level.version.startsWith(ver);
+          return level.normalizedWords.includes(w);
+        })
       );
       if (collisions.length > 1) {
-        // store short-lived selection list
+        // store for selection (only store the small info array to avoid heavy objects)
         lastMultiMatch[msg.author.id] = { timestamp: Date.now(), matches: collisions.map(c => ({ name: c.name, top: c.top })) };
         return msg.reply(
           `Multiple modes match your query:\n` +
@@ -222,8 +230,12 @@ client.on("messageCreate", async msg => {
       return msg.reply(`I couldn't find anything close to **${query}**.`);
     }
 
-    // reply with result
-    return msg.reply(`${match.exactMatch ? "**" + match.name + "**" : "I assumed you meant: **" + match.name + "**"} — ranked **#${match.top}**`);
+    // reply
+    if (match.exactMatch) {
+      return msg.reply(`**${match.name}** is ranked **#${match.top}** on the list.`);
+    } else {
+      return msg.reply(`I assumed you meant: **${match.name}** — ranked **#${match.top}**`);
+    }
 
   } catch (err) {
     console.error("Handler error:", err);
@@ -231,4 +243,5 @@ client.on("messageCreate", async msg => {
   }
 });
 
+// ---------- start ----------
 client.login(TOKEN);
