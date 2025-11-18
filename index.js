@@ -1,18 +1,31 @@
 const { Client, GatewayIntentBits } = require("discord.js");
 const axios = require("axios");
+require('dotenv').config();
 
 // -------------------------------
-// BOT TOKEN — PUT YOUR TOKEN HERE
+// BOT TOKEN
 // -------------------------------
-const TOKEN = "censored";
+const TOKEN = process.env.DISCORD_TOKEN;
 
 // -------------------------------
-// API URL — THIS PAGE RETURNS A LIST OF LEVELS
+// API URL — RETURNS LIST OF LEVELS
 // -------------------------------
 const API_URL = "https://aml-api-eta.vercel.app/levels/ml/page/1/f4386831-1c4a-4617-a072-b2f65c06846e";
 
+// -------------------------------
+// ACRONYM MAPPING
+// Example: "PM" could mean multiple modes
+// -------------------------------
+const modeMap = {
+    "PM": ["Pizza Man", "Puppet Master"],
+    "HP": ["Hopeless Pursuit"],
+    "RV": ["Release Version"],
+    "NPG": ["No Power Generator"]
+};
 
-// Create Discord client with required intents
+// -------------------------------
+// Create Discord client
+// -------------------------------
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -21,17 +34,32 @@ const client = new Client({
     ]
 });
 
+// -------------------------------
+// HELPER: Normalize string
+// Lowercase, remove punctuation except dots (for version numbers)
+// -------------------------------
+function normalize(str) {
+    return str.toLowerCase().replace(/[^a-z0-9\.]+/g, " ").trim();
+}
 
-// ------------------------------------------------------
+// -------------------------------
+// HELPER: Extract version number (like v1.2, v1.2.0.5 → 1.2)
+// -------------------------------
+function extractVersion(str) {
+    const match = str.match(/v?(\d+(\.\d+)*)/i);
+    return match ? match[1] : null;
+}
+
+// -------------------------------
 // HELPER: Levenshtein similarity (0 to 1)
-// ------------------------------------------------------
+// Only used as last resort
+// -------------------------------
 function similarity(a, b) {
     a = a.toLowerCase();
     b = b.toLowerCase();
 
     const lenA = a.length;
     const lenB = b.length;
-
     if (lenA === 0 && lenB === 0) return 1;
     if (lenA === 0 || lenB === 0) return 0;
 
@@ -54,72 +82,91 @@ function similarity(a, b) {
     }
 
     const distance = dp[lenA][lenB];
-    const maxLen = Math.max(lenA, lenB);
-    return 1 - distance / maxLen;
+    return 1 - distance / Math.max(lenA, lenB);
 }
 
-
-// ------------------------------------------------------
-// HELPER: Find best match (exact → substring → fuzzy)
-// ------------------------------------------------------
+// -------------------------------
+// HELPER: Find best match
+// 1) Exact match
+// 2) Acronym match
+// 3) Multi-word match (all words in query must exist)
+// 4) Fuzzy match (last resort)
+// -------------------------------
 function findBestMatch(levels, query) {
-    const q = query.toLowerCase();
+    const q = normalize(query);
+    const qWords = q.split(" ");
 
     // 1) Exact match
-    let exact = levels.find(
-        (level) => level.name && level.name.toLowerCase() === q
-    );
+    let exact = levels.find(level => level.name && normalize(level.name) === q);
     if (exact) {
         exact.exactMatch = true;
         return exact;
     }
 
-    // 2) Substring match (autofill)
-    const substringCandidates = levels.filter(
-        (level) =>
-            level.name && level.name.toLowerCase().includes(q)
-    );
-
-    if (substringCandidates.length > 0) {
-        let best = substringCandidates[0];
-        let bestExtra = best.name.length - q.length;
-
-        for (const level of substringCandidates) {
-            const extra = level.name.length - q.length;
-            if (extra >= 0 && extra < bestExtra) {
-                best = level;
-                bestExtra = extra;
+    // 2) Acronym match
+    if (modeMap[q.toUpperCase()]) {
+        const options = modeMap[q.toUpperCase()];
+        if (options.length === 1) {
+            const level = levels.find(l => l.name === options[0]);
+            if (level) {
+                level.exactMatch = true;
+                return level;
             }
+        } else {
+            // ambiguous acronym
+            return null;
         }
-
-        best.exactMatch = false;
-        return best;
     }
 
-    // 3) Fuzzy match (typos)
-    let bestMatch = null;
-    let bestScore = 0;
+    // 3) Multi-word match
+    const multiWordMatches = levels.filter(level => {
+        if (!level.name) return false;
+        const modeWords = normalize(level.name).split(" ");
+        return qWords.every(word => modeWords.includes(word));
+    });
 
+    if (multiWordMatches.length === 1) {
+        multiWordMatches[0].exactMatch = false;
+        return multiWordMatches[0];
+    } else if (multiWordMatches.length > 1) {
+        // optional: pick by version
+        const inputVersion = extractVersion(q);
+        if (inputVersion) {
+            const versionMatch = multiWordMatches.find(level => {
+                const levelVersion = extractVersion(level.name);
+                return levelVersion && levelVersion.startsWith(inputVersion);
+            });
+            if (versionMatch) {
+                versionMatch.exactMatch = false;
+                return versionMatch;
+            }
+        }
+        multiWordMatches[0].exactMatch = false;
+        return multiWordMatches[0];
+    }
+
+    // 4) Fuzzy match (last resort)
+    let bestScore = 0;
+    let bestMatch = null;
     for (const level of levels) {
         if (!level.name) continue;
-        const score = similarity(q, level.name);
+        const score = similarity(q, normalize(level.name));
         if (score > bestScore) {
             bestScore = score;
             bestMatch = level;
         }
     }
+    if (bestScore >= 0.7) {
+        bestMatch.exactMatch = false;
+        return bestMatch;
+    }
 
-    const THRESHOLD = 0.4;
-    if (!bestMatch || bestScore < THRESHOLD) return null;
-
-    bestMatch.exactMatch = false;
-    return bestMatch;
+    return null;
 }
 
-
-// ------------------------------------------------------
-// COMMAND HANDLING: !rank <name>
-// ------------------------------------------------------
+// -------------------------------
+// COMMAND HANDLER: !rank <name>
+// -------------------------------
 client.on("messageCreate", async (msg) => {
     if (msg.author.bot) return;
     if (!msg.content.toLowerCase().startsWith("!rank")) return;
@@ -144,18 +191,16 @@ client.on("messageCreate", async (msg) => {
             return msg.reply(`I couldn't find anything close to **${query}**.`);
         }
 
-        // PERFECT MATCH → clean reply
-        if (bestMatch.exactMatch === true) {
+        if (bestMatch.exactMatch) {
             return msg.reply(
                 `**${bestMatch.name}** is ranked **#${bestMatch.top}** on the list.`
             );
+        } else {
+            return msg.reply(
+                `I assumed you meant: **${bestMatch.name}**\n` +
+                `It is ranked **#${bestMatch.top}** on the list.`
+            );
         }
-
-        // PARTIAL OR FUZZY MATCH → suggestion
-        return msg.reply(
-            `I assumed you meant: **${bestMatch.name}**\n` +
-            `It is ranked **#${bestMatch.top}** on the list.`
-        );
 
     } catch (error) {
         console.error(error);
@@ -163,6 +208,7 @@ client.on("messageCreate", async (msg) => {
     }
 });
 
-
-// Start the bot
+// -------------------------------
+// Start bot
+// -------------------------------
 client.login(TOKEN);
