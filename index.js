@@ -16,13 +16,15 @@ const API_URL = "https://aml-api-eta.vercel.app/levels/ml/page/1/f4386831-1c4a-4
 // ACRONYM MAPPING
 // Example: "PM" could mean multiple modes
 // -------------------------------
-const modeMap = {
-    "PM": ["Pizza Man", "Puppet Master"],
-    "HP": ["Hopeless Pursuit"],
-    "RV": ["Release Version"],
-    "NPG": ["No Power Generator"]
-};
+const modeMap = {};
 
+levels.forEach(level => {
+    if (!level.name) return;
+    const acronym = generateAcronym(level.name);
+
+    if (!modeMap[acronym]) modeMap[acronym] = [];
+    modeMap[acronym].push(level.name);
+});
 // -------------------------------
 // Create Discord client
 // -------------------------------
@@ -212,3 +214,4 @@ client.on("messageCreate", async (msg) => {
 // Start bot
 // -------------------------------
 client.login(TOKEN);
+
