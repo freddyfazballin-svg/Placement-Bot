@@ -6,8 +6,8 @@ require('dotenv').config();
 // BOT & API
 // -------------------------------
 const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID; // Your bot's client ID
-const GUILD_ID = process.env.GUILD_ID;   // Optional, for testing in one guild
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
 const API_URL = "https://aml-api-eta.vercel.app/levels/ml/page/1/f4386831-1c4a-4617-a072-b2f65c06846e";
 
 // -------------------------------
@@ -51,14 +51,14 @@ function similarity(a = "", b = "") {
     for (let i = 1; i <= lenA; i++) {
         for (let j = 1; j <= lenB; j++) {
             const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-            dp[i][j] = Math.min(dp[i - 1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+cost);
+            dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
         }
     }
-    return 1 - dp[lenA][lenB]/Math.max(lenA,lenB);
+    return 1 - dp[lenA][lenB] / Math.max(lenA, lenB);
 }
 
 // -------------------------------
-// HELPER: Generate acronym (keep all words)
+// HELPER: Generate acronym
 // -------------------------------
 function generateAcronym(name = "") {
     return name.split(/\s+/).filter(Boolean).map(word => word[0].toUpperCase()).join('');
@@ -105,8 +105,8 @@ function findBestMatch(levels, query) {
     const inputVersion = extractVersion(q);
     if (inputVersion && multiWordMatches.length > 1) {
         const versionMatch = multiWordMatches.find(l => {
-            const levelVersion = extractVersion(l.name);
-            return levelVersion && levelVersion.startsWith(inputVersion);
+            const lv = extractVersion(l.name);
+            return lv && lv.startsWith(inputVersion);
         });
         if (versionMatch) { versionMatch.exactMatch = false; return versionMatch; }
     }
@@ -115,7 +115,7 @@ function findBestMatch(levels, query) {
         multiWordMatches[0].exactMatch = false;
         return multiWordMatches[0];
     } else if (multiWordMatches.length > 1) {
-        return null; // multiple matches, let user choose
+        return null;
     }
 
     // Fuzzy match
@@ -125,13 +125,16 @@ function findBestMatch(levels, query) {
         const score = similarity(q, normalize(l.name));
         if (score > bestScore) { bestScore = score; bestMatch = l; }
     });
-    if (bestScore >= 0.7) { bestMatch.exactMatch = false; return bestMatch; }
+    if (bestScore >= 0.7) {
+        bestMatch.exactMatch = false;
+        return bestMatch;
+    }
 
     return null;
 }
 
 // -------------------------------
-// REGISTER SLASH COMMAND
+// Register slash command
 // -------------------------------
 const commands = [
     new SlashCommandBuilder()
@@ -154,11 +157,13 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
             { body: commands }
         );
         console.log('Slash command /rank registered.');
-    } catch (err) { console.error(err); }
+    } catch (err) {
+        console.error(err);
+    }
 })();
 
 // -------------------------------
-// SLASH COMMAND HANDLER
+// Slash command handler
 // -------------------------------
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
@@ -167,16 +172,18 @@ client.on('interactionCreate', async interaction => {
     const query = interaction.options.getString('mode');
 
     try {
-    await interaction.deferReply({ ephemeral: true });
+        // 🔥 Fix for 10062 — acknowledge instantly
+        await interaction.deferReply({ ephemeral: true });
 
-    const response = await axios.get(API_URL);  // ← MUST be here, after defer
-    const levels = response.data;
-    if (!Array.isArray(levels)) throw new Error('Invalid API response');
+        // Fetch API
+        const response = await axios.get(API_URL);
+        const levels = response.data;
+        if (!Array.isArray(levels)) throw new Error('Invalid API response');
 
+        // Process match
         let bestMatch = findBestMatch(levels, query);
 
         if (!bestMatch) {
-            // Multi-word collisions
             const qWords = normalize(query).split(" ");
             const multiWordMatches = levels.filter(l => {
                 if (!l.name) return false;
@@ -186,32 +193,29 @@ client.on('interactionCreate', async interaction => {
 
             if (multiWordMatches.length > 1) {
                 lastMultiMatch[interaction.user.id] = multiWordMatches;
-                return interaction.reply({
-                    content:
-                        `Multiple modes match your query:\n` +
-                        multiWordMatches.map((l,i) => `${i+1}. ${l.name}`).join('\n') +
-                        `\nType the number of the mode with /select <number>`,
-                    ephemeral: true
-                });
+                return interaction.editReply(
+                    `Multiple modes match your query:\n` +
+                    multiWordMatches.map((l,i) => `${i+1}. ${l.name}`).join('\n') +
+                    `\nType the number with /select <number>`
+                );
             }
 
-            return interaction.reply({ content: `I couldn't find anything close to **${query}**.`, ephemeral: true });
+            return interaction.editReply(`I couldn't find anything close to **${query}**.`);
         }
 
         const reply = bestMatch.exactMatch
-            ? `**${bestMatch.name}** is ranked **#${bestMatch.top}** on the list.`
-            : `I assumed you meant: **${bestMatch.name}**\nIt is ranked **#${bestMatch.top}** on the list.`;
+            ? `**${bestMatch.name}** is ranked **#${bestMatch.top}**.`
+            : `I assumed you meant: **${bestMatch.name}**\nIt is ranked **#${bestMatch.top}**.`;
 
-        return interaction.reply({ content: reply, ephemeral: true });
+        return interaction.editReply(reply);
 
     } catch (err) {
         console.error(err);
-        return interaction.reply({ content: 'There was an error while contacting the API.', ephemeral: true });
+        return interaction.editReply('There was an error while contacting the API.');
     }
 });
 
 // -------------------------------
-// START BOT
+// Start bot
 // -------------------------------
 client.login(TOKEN);
-
