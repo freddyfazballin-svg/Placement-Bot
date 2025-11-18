@@ -1,27 +1,26 @@
-const { Client, GatewayIntentBits } = require("discord.js");
-const axios = require("axios");
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
+const axios = require('axios');
 require('dotenv').config();
 
 // -------------------------------
-// BOT TOKEN
+// BOT & API
 // -------------------------------
 const TOKEN = process.env.DISCORD_TOKEN;
-
-// -------------------------------
-// API URL — RETURNS LIST OF LEVELS
-// -------------------------------
+const CLIENT_ID = process.env.CLIENT_ID; // Your bot's client ID
+const GUILD_ID = process.env.GUILD_ID;   // Optional, for testing in one guild
 const API_URL = "https://aml-api-eta.vercel.app/levels/ml/page/1/f4386831-1c4a-4617-a072-b2f65c06846e";
 
 // -------------------------------
 // Create Discord client
 // -------------------------------
 const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
-    ]
+    intents: [GatewayIntentBits.Guilds]
 });
+
+// -------------------------------
+// In-memory store for multi-match selection
+// -------------------------------
+const lastMultiMatch = {}; // key: userId
 
 // -------------------------------
 // HELPER: Normalize string
@@ -42,42 +41,27 @@ function extractVersion(str = "") {
 // HELPER: Levenshtein similarity
 // -------------------------------
 function similarity(a = "", b = "") {
-    a = a.toLowerCase();
-    b = b.toLowerCase();
-
-    const lenA = a.length;
-    const lenB = b.length;
+    a = a.toLowerCase(); b = b.toLowerCase();
+    const lenA = a.length, lenB = b.length;
     if (lenA === 0 && lenB === 0) return 1;
     if (lenA === 0 || lenB === 0) return 0;
-
-    const dp = Array.from({ length: lenA + 1 }, () => new Array(lenB + 1).fill(0));
+    const dp = Array.from({ length: lenA + 1 }, () => Array(lenB + 1).fill(0));
     for (let i = 0; i <= lenA; i++) dp[i][0] = i;
     for (let j = 0; j <= lenB; j++) dp[0][j] = j;
-
     for (let i = 1; i <= lenA; i++) {
         for (let j = 1; j <= lenB; j++) {
             const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-            dp[i][j] = Math.min(
-                dp[i - 1][j] + 1,
-                dp[i][j - 1] + 1,
-                dp[i - 1][j - 1] + cost
-            );
+            dp[i][j] = Math.min(dp[i - 1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+cost);
         }
     }
-
-    return 1 - dp[lenA][lenB] / Math.max(lenA, lenB);
+    return 1 - dp[lenA][lenB]/Math.max(lenA,lenB);
 }
 
-// -------------------------------
 // -------------------------------
 // HELPER: Generate acronym (keep all words)
 // -------------------------------
 function generateAcronym(name = "") {
-    return name
-        .split(/\s+/)
-        .filter(word => word)        // only remove empty strings
-        .map(word => word[0].toUpperCase())
-        .join('');
+    return name.split(/\s+/).filter(Boolean).map(word => word[0].toUpperCase()).join('');
 }
 
 // -------------------------------
@@ -87,22 +71,18 @@ function findBestMatch(levels, query) {
     const q = normalize(query);
     const qWords = q.split(" ");
 
-    // 1) Exact match
-    let exact = levels.find(level => level.name && normalize(level.name) === q);
-    if (exact) {
-        exact.exactMatch = true;
-        return exact;
-    }
+    // Exact match
+    let exact = levels.find(l => l.name && normalize(l.name) === q);
+    if (exact) { exact.exactMatch = true; return exact; }
 
-    // 2) Acronym match
+    // Acronym match
     const acronymMap = {};
-    levels.forEach(level => {
-    if (!level.name) return; // skip missing names
-    const acr = generateAcronym(level.name); // safe now
-    if (!acronymMap[acr]) acronymMap[acr] = [];
-    acronymMap[acr].push(level);
-});
-
+    levels.forEach(l => {
+        if (!l.name) return;
+        const acr = generateAcronym(l.name);
+        if (!acronymMap[acr]) acronymMap[acr] = [];
+        acronymMap[acr].push(l);
+    });
     const upperQuery = query.replace(/\s+/g, '').toUpperCase();
     if (acronymMap[upperQuery]) {
         if (acronymMap[upperQuery].length === 1) {
@@ -114,107 +94,121 @@ function findBestMatch(levels, query) {
         }
     }
 
-    // 3) Multi-word match
-    const multiWordMatches = levels.filter(level => {
-        if (!level.name) return false;
-        const modeWords = normalize(level.name).split(" ");
-        return qWords.every(word => modeWords.includes(word));
+    // Multi-word match
+    let multiWordMatches = levels.filter(l => {
+        if (!l.name) return false;
+        const words = normalize(l.name).split(" ");
+        return qWords.every(w => words.includes(w));
     });
+
+    // Version-aware disambiguation
+    const inputVersion = extractVersion(q);
+    if (inputVersion && multiWordMatches.length > 1) {
+        const versionMatch = multiWordMatches.find(l => {
+            const levelVersion = extractVersion(l.name);
+            return levelVersion && levelVersion.startsWith(inputVersion);
+        });
+        if (versionMatch) { versionMatch.exactMatch = false; return versionMatch; }
+    }
 
     if (multiWordMatches.length === 1) {
         multiWordMatches[0].exactMatch = false;
         return multiWordMatches[0];
     } else if (multiWordMatches.length > 1) {
-        const inputVersion = extractVersion(q);
-        if (inputVersion) {
-            const versionMatch = multiWordMatches.find(level => {
-                const levelVersion = extractVersion(level.name);
-                return levelVersion && levelVersion.startsWith(inputVersion);
-            });
-            if (versionMatch) {
-                versionMatch.exactMatch = false;
-                return versionMatch;
-            }
-        }
-        return null; // multiple matches, ask user
+        return null; // multiple matches, let user choose
     }
 
-    // 4) Fuzzy match
-    let bestScore = 0;
-    let bestMatch = null;
-    for (const level of levels) {
-        if (!level.name) continue;
-        const score = similarity(q, normalize(level.name));
-        if (score > bestScore) {
-            bestScore = score;
-            bestMatch = level;
-        }
-    }
-    if (bestScore >= 0.7) {
-        bestMatch.exactMatch = false;
-        return bestMatch;
-    }
+    // Fuzzy match
+    let bestScore = 0, bestMatch = null;
+    levels.forEach(l => {
+        if (!l.name) return;
+        const score = similarity(q, normalize(l.name));
+        if (score > bestScore) { bestScore = score; bestMatch = l; }
+    });
+    if (bestScore >= 0.7) { bestMatch.exactMatch = false; return bestMatch; }
 
     return null;
 }
 
 // -------------------------------
-// COMMAND HANDLER: !rank <name>
+// REGISTER SLASH COMMAND
 // -------------------------------
-client.on("messageCreate", async (msg) => {
-    if (msg.author.bot) return;
-    if (!msg.content.toLowerCase().startsWith("!rank")) return;
+const commands = [
+    new SlashCommandBuilder()
+        .setName('rank')
+        .setDescription('Get the rank of a mode')
+        .addStringOption(option =>
+            option.setName('mode')
+                  .setDescription('Mode name or acronym')
+                  .setRequired(true)
+        )
+        .toJSON()
+];
 
-    const query = msg.content.slice("!rank".length).trim();
-    if (!query) {
-        return msg.reply("Tell me a mode name. Example: `!rank Hopeless Pursuit`");
-    }
+const rest = new REST({ version: '10' }).setToken(TOKEN);
+
+(async () => {
+    try {
+        await rest.put(
+            Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+            { body: commands }
+        );
+        console.log('Slash command /rank registered.');
+    } catch (err) { console.error(err); }
+})();
+
+// -------------------------------
+// SLASH COMMAND HANDLER
+// -------------------------------
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isChatInputCommand()) return;
+    if (interaction.commandName !== 'rank') return;
+
+    const query = interaction.options.getString('mode');
 
     try {
         const response = await axios.get(API_URL);
         const levels = response.data;
-
-        if (!Array.isArray(levels)) {
-            console.error("API returned:", levels);
-            return msg.reply("API returned an unexpected result.");
-        }
+        if (!Array.isArray(levels)) throw new Error('Invalid API response');
 
         let bestMatch = findBestMatch(levels, query);
 
         if (!bestMatch) {
-            // check multi-word collision
+            // Multi-word collisions
             const qWords = normalize(query).split(" ");
-            const multiWordMatches = levels.filter(level => {
-                if (!level.name) return false;
-                const modeWords = normalize(level.name).split(" ");
-                return qWords.every(word => modeWords.includes(word));
+            const multiWordMatches = levels.filter(l => {
+                if (!l.name) return false;
+                const words = normalize(l.name).split(" ");
+                return qWords.every(w => words.includes(w));
             });
 
             if (multiWordMatches.length > 1) {
-                return msg.reply(
-                    `Multiple modes match your query:\n` +
-                    multiWordMatches.map((l, i) => `${i+1}. ${l.name}`).join("\n") +
-                    `\nPlease specify which one you mean.`
-                );
+                lastMultiMatch[interaction.user.id] = multiWordMatches;
+                return interaction.reply({
+                    content:
+                        `Multiple modes match your query:\n` +
+                        multiWordMatches.map((l,i) => `${i+1}. ${l.name}`).join('\n') +
+                        `\nType the number of the mode with /select <number>`,
+                    ephemeral: true
+                });
             }
 
-            return msg.reply(`I couldn't find anything close to **${query}**.`);
+            return interaction.reply({ content: `I couldn't find anything close to **${query}**.`, ephemeral: true });
         }
 
-        if (bestMatch.exactMatch) {
-            return msg.reply(`**${bestMatch.name}** is ranked **#${bestMatch.top}** on the list.`);
-        } else {
-            return msg.reply(`I assumed you meant: **${bestMatch.name}**\nIt is ranked **#${bestMatch.top}** on the list.`);
-        }
+        const reply = bestMatch.exactMatch
+            ? `**${bestMatch.name}** is ranked **#${bestMatch.top}** on the list.`
+            : `I assumed you meant: **${bestMatch.name}**\nIt is ranked **#${bestMatch.top}** on the list.`;
 
-    } catch (error) {
-        console.error(error);
-        msg.reply("There was an error while contacting the API.");
+        return interaction.reply({ content: reply, ephemeral: true });
+
+    } catch (err) {
+        console.error(err);
+        return interaction.reply({ content: 'There was an error while contacting the API.', ephemeral: true });
     }
 });
 
 // -------------------------------
-// Start bot
+// START BOT
 // -------------------------------
 client.login(TOKEN);
-
