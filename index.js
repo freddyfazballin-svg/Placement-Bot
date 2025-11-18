@@ -74,7 +74,7 @@ function similarity(a = "", b = "") {
 function generateAcronym(name = "") {
     return name
         .split(/\s+/)
-        .filter(word => !["a","the","of","no","on","in"].includes(word.toLowerCase()))
+        .filter(word => word && !["a","the","of","no","on","in"].includes(word.toLowerCase()))
         .map(word => word[0].toUpperCase())
         .join('');
 }
@@ -96,11 +96,11 @@ function findBestMatch(levels, query) {
     // 2) Acronym match
     const acronymMap = {};
     levels.forEach(level => {
-        if (!level.name) return;
-        const acr = generateAcronym(level.name);
-        if (!acronymMap[acr]) acronymMap[acr] = [];
-        acronymMap[acr].push(level);
-    });
+    if (!level.name) return; // skip missing names
+    const acr = generateAcronym(level.name); // safe now
+    if (!acronymMap[acr]) acronymMap[acr] = [];
+    acronymMap[acr].push(level);
+});
 
     const upperQuery = query.replace(/\s+/g, '').toUpperCase();
     if (acronymMap[upperQuery]) {
@@ -216,3 +216,4 @@ client.on("messageCreate", async (msg) => {
 // Start bot
 // -------------------------------
 client.login(TOKEN);
+
