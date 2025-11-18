@@ -51,7 +51,11 @@ function similarity(a = "", b = "") {
     for (let i = 1; i <= lenA; i++) {
         for (let j = 1; j <= lenB; j++) {
             const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-            dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+            dp[i][j] = Math.min(
+                dp[i - 1][j] + 1,
+                dp[i][j - 1] + 1,
+                dp[i - 1][j - 1] + cost
+            );
         }
     }
     return 1 - dp[lenA][lenB] / Math.max(lenA, lenB);
@@ -61,7 +65,11 @@ function similarity(a = "", b = "") {
 // HELPER: Generate acronym
 // -------------------------------
 function generateAcronym(name = "") {
-    return name.split(/\s+/).filter(Boolean).map(word => word[0].toUpperCase()).join('');
+    return name
+        .split(/\s+/)
+        .filter(Boolean)
+        .map(word => word[0].toUpperCase())
+        .join('');
 }
 
 // -------------------------------
@@ -123,7 +131,10 @@ function findBestMatch(levels, query) {
     levels.forEach(l => {
         if (!l.name) return;
         const score = similarity(q, normalize(l.name));
-        if (score > bestScore) { bestScore = score; bestMatch = l; }
+        if (score > bestScore) {
+            bestScore = score;
+            bestMatch = l;
+        }
     });
     if (bestScore >= 0.7) {
         bestMatch.exactMatch = false;
@@ -171,16 +182,14 @@ client.on('interactionCreate', async interaction => {
 
     const query = interaction.options.getString('mode');
 
-    try {
-        // 🔥 Fix for 10062 — acknowledge instantly
-        await interaction.deferReply({ ephemeral: true });
+    // 🛠️ ALWAYS defer FIRST to avoid InteractionNotReplied / 10062
+    await interaction.deferReply({ ephemeral: true });
 
-        // Fetch API
+    try {
         const response = await axios.get(API_URL);
         const levels = response.data;
         if (!Array.isArray(levels)) throw new Error('Invalid API response');
 
-        // Process match
         let bestMatch = findBestMatch(levels, query);
 
         if (!bestMatch) {
@@ -195,7 +204,7 @@ client.on('interactionCreate', async interaction => {
                 lastMultiMatch[interaction.user.id] = multiWordMatches;
                 return interaction.editReply(
                     `Multiple modes match your query:\n` +
-                    multiWordMatches.map((l,i) => `${i+1}. ${l.name}`).join('\n') +
+                    multiWordMatches.map((l, i) => `${i + 1}. ${l.name}`).join('\n') +
                     `\nType the number with /select <number>`
                 );
             }
